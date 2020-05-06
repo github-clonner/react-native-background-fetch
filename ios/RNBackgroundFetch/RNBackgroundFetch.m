@@ -18,6 +18,7 @@
 
 static NSString *const RN_BACKGROUND_FETCH_TAG = @"RNBackgroundFetch";
 static NSString *const EVENT_FETCH = @"fetch";
+static NSString *const PLUGIN_ID = @"react-native-background-fetch";
 
 @implementation RNBackgroundFetch {
     BOOL configured;
@@ -28,10 +29,15 @@ RCT_EXPORT_MODULE();
 -(instancetype)init
 {
     self = [super init];
-    
+
     configured = NO;
-    
+
     return self;
+}
+
++ (BOOL)requiresMainQueueSetup
+{
+    return NO;
 }
 
 - (NSArray<NSString *> *)supportedEvents {
@@ -40,61 +46,87 @@ RCT_EXPORT_MODULE();
 
 RCT_EXPORT_METHOD(configure:(NSDictionary*)config failure:(RCTResponseSenderBlock)failure)
 {
-    if (configured) {
-        RCTLogInfo(@"- %@ already configured", RN_BACKGROUND_FETCH_TAG);
-    }
-    RCTLogInfo(@"- %@ configure", RN_BACKGROUND_FETCH_TAG);
-    
     TSBackgroundFetch *fetchManager = [TSBackgroundFetch sharedInstance];
-    [fetchManager configure:config];
-    
-    if ([fetchManager start]) {
-        configured = YES;
-        void (^handler)();
-        handler = ^void(void){
-            RCTLogInfo(@"- %@ Rx Fetch Event", RN_BACKGROUND_FETCH_TAG);
-            [self sendEventWithName:EVENT_FETCH body:nil];
-        };
-        [fetchManager addListener:RN_BACKGROUND_FETCH_TAG callback:handler];
-    } else {
-        RCTLogInfo(@"- %@ failed to start", RN_BACKGROUND_FETCH_TAG);
-        failure(@[@"Failed to start background fetch API"]);
-    }
+
+    [fetchManager addListener:PLUGIN_ID callback:[self createCallback]];
+
+    NSTimeInterval delay = [[config objectForKey:@"minimumFetchInterval"] doubleValue] * 60;
+    [fetchManager configure:delay callback:^(UIBackgroundRefreshStatus status) {
+        self->configured = YES;
+        if (status != UIBackgroundRefreshStatusAvailable) {
+            NSLog(@"- %@ failed to start, status: %ld", RN_BACKGROUND_FETCH_TAG, (long)status);
+            failure(@[@(status)]);
+        }
+    }];
 }
 
 RCT_EXPORT_METHOD(start:(RCTResponseSenderBlock)success failure:(RCTResponseSenderBlock)failure)
 {
-    RCTLogInfo(@"- %@ start", RN_BACKGROUND_FETCH_TAG);
     TSBackgroundFetch *fetchManager = [TSBackgroundFetch sharedInstance];
-    if ([fetchManager start]) {
-        success(@[]);
+
+    [fetchManager status:^(UIBackgroundRefreshStatus status) {
+        if (status == UIBackgroundRefreshStatusAvailable) {
+            [fetchManager addListener:PLUGIN_ID callback:[self createCallback]];
+            NSError *error = [fetchManager start:nil];
+            if (!error) {
+                success(@[@(status)]);
+            } else {
+                failure(@[error.localizedDescription]);
+            }
+        } else {
+            NSLog(@"- %@ failed to start, status: %lu", PLUGIN_ID, (long)status);
+            NSString *msg = [NSString stringWithFormat:@"%ld", (long) status];
+            failure(@[msg]);
+        }
+    }];
+}
+
+RCT_EXPORT_METHOD(stop:(NSString*)taskId success:(RCTResponseSenderBlock)success failure:(RCTResponseSenderBlock)failure)
+{
+    TSBackgroundFetch *fetchManager = [TSBackgroundFetch sharedInstance];
+    if (!taskId) {
+        [fetchManager removeListener:PLUGIN_ID];
+    }
+    [fetchManager stop:taskId];
+    success(@[@(YES)]);
+}
+
+RCT_EXPORT_METHOD(scheduleTask:(NSDictionary*)config success:(RCTResponseSenderBlock)success failure:(RCTResponseSenderBlock)failure) {
+    NSString *taskId = [config objectForKey:@"taskId"];
+    long delayMS = [[config objectForKey:@"delay"] longValue];
+    NSTimeInterval delay = delayMS / 1000;
+    BOOL periodic = [[config objectForKey:@"periodic"] boolValue];
+
+    NSError *error = [[TSBackgroundFetch sharedInstance] scheduleProcessingTaskWithIdentifier:taskId
+                                                                                        delay:delay
+                                                                                     periodic:periodic
+                                                                                     callback:[self createCallback]];
+    if (!error) {
+        success(@[@(YES)]);
     } else {
-        RCTLogInfo(@"- %@ failed to start", RN_BACKGROUND_FETCH_TAG);
-        failure(@[@"Failed to start background fetch API"]);
+        failure(@[error.localizedDescription]);
     }
 }
 
-RCT_EXPORT_METHOD(stop)
+RCT_EXPORT_METHOD(finish:(NSString*)taskId)
 {
-    RCTLogInfo(@"- RNBackgroundFetch stop");
     TSBackgroundFetch *fetchManager = [TSBackgroundFetch sharedInstance];
-    [fetchManager stop];
-}
-
-RCT_EXPORT_METHOD(finish)
-{
-    RCTLogInfo(@"- RNBackgroundFetch finish");
-    TSBackgroundFetch *fetchManager = [TSBackgroundFetch sharedInstance];
-    [fetchManager finish:RN_BACKGROUND_FETCH_TAG result:UIBackgroundFetchResultNewData];
+    [fetchManager finish:taskId];
 }
 
 RCT_EXPORT_METHOD(status:(RCTResponseSenderBlock)callback)
 {
-    RCTLogInfo(@"- RNBackgroundFetch status");
-    TSBackgroundFetch *fetchManager = [TSBackgroundFetch sharedInstance];
-    callback(@[@([fetchManager status])]);
+    [[TSBackgroundFetch sharedInstance] status:^(UIBackgroundRefreshStatus status) {
+        callback(@[@(status)]);
+    }];
 }
 
+-(void (^)(NSString* taskId)) createCallback {
+    return ^void(NSString* taskId){
+        RCTLogInfo(@"- %@ Rx Fetch Event", RN_BACKGROUND_FETCH_TAG);
+        [self sendEventWithName:EVENT_FETCH body:taskId];
+    };
+}
 
 -(NSString*) eventName:(NSString*)name
 {
@@ -103,7 +135,7 @@ RCT_EXPORT_METHOD(status:(RCTResponseSenderBlock)callback)
 
 - (void)dealloc
 {
-    
+
 }
 
 @end

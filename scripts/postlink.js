@@ -8,14 +8,15 @@ const helpers = require('./xcode-helpers');
 
 const projectDirectory = process.cwd();
 const moduleDirectory = path.resolve(__dirname, '..');
-const packageManifest = require(projectDirectory + '/package.json');
+const sourceDirectory = path.join(projectDirectory, 'ios');
+const xcodeProjectDirectory = helpers.findProject(sourceDirectory);
 
 const projectConfig = {
-    sourceDir: path.join(projectDirectory, 'ios'),
+    sourceDir: sourceDirectory,
     pbxprojPath: path.join(
         projectDirectory,
         'ios',
-        packageManifest.name + '.xcodeproj',
+        xcodeProjectDirectory,
         'project.pbxproj'
     ),
 };
@@ -40,6 +41,9 @@ const pathToAppdelegateExtension = path.relative(
 );
 
 const project = xcode.project(projectConfig.pbxprojPath).parseSync();
+// Monkey-patch XCode to search PBXGroups with ignore-case.
+project.findPBXGroupKeyAndType = helpers.findPBXGroupKeyAndType;
+
 
 /**
  * There is a method in node-xcode that offers similar functionality than what
@@ -80,23 +84,20 @@ if (!project.hasFile(file.path)) {
     project.addToPbxFrameworksBuildPhase(file);
 }
 
-helpers.addToFrameworkSearchPaths(
-    project,
-    '$(PROJECT_DIR)/' +
-    path.relative(
-        projectConfig.sourceDir,
-        path.join(moduleDirectory, 'ios')
-    ),
-    true
-);
+const podFile = path.join(sourceDirectory, 'Podfile');
+const hasPodfile = fs.existsSync(podFile);
 
-// extends the projects AppDelegate.m with our completion handler
-const projectGroup = project.findPBXGroupKey({ name: packageManifest.name });
-project.addSourceFile(
-    pathToAppdelegateExtension,
-    { target: project.getFirstTarget().uuid },
-    projectGroup
-);
+if (!hasPodfile) {
+    helpers.addToFrameworkSearchPaths(
+        project,
+        '$(PROJECT_DIR)/' +
+        path.relative(
+            projectConfig.sourceDir,
+            path.join(moduleDirectory, 'ios')
+        ),
+        true
+    );
+}
 
 // enable BackgroundModes in xcode project without overriding any previously
 // defined values in the project file.
@@ -123,5 +124,29 @@ if (UIBackgroundModes.indexOf('fetch') === -1) {
     plist.UIBackgroundModes = UIBackgroundModes.concat('fetch');
 }
 
+// Add RNBackgroundFetch+AppDelegate.m extension.
+const groupName = xcodeProjectDirectory.replace('.xcodeproj', '');
+var projectGroup = project.findPBXGroupKey({ name: groupName }) || project.findPBXGroupKey({path: groupName});
+
+if (projectGroup) {
+  project.addSourceFile(
+    pathToAppdelegateExtension,
+    { target: project.getFirstTarget().uuid },
+    projectGroup
+  );
+} else {
+  var red = "\x1b[31m";
+  var yellow = "\x1b[33m"
+  var colorReset = '\x1b[0m';
+  console.log(yellow, project.hash.project.objects.PBXGroup);
+  console.error(red, '[react-native-background-fetch] LINK ERROR: Failed to find projectGroup PBXGroup: ', groupName);
+  console.error(red, '[react-native-background-fetch] Failed to add RNBackgroundFetch+AppDelegate.m.  See Manual Setup instructions to add this file to your project.');
+  console.error(red, '[react-native-bacgkround-fetch] Please post an issue at Github, including all the output above');
+  console.error(colorReset);
+}
+
 helpers.writePlist(projectConfig.sourceDir, project, plist);
 fs.writeFileSync(projectConfig.pbxprojPath, project.writeSync());
+
+
+
